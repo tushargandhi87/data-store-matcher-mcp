@@ -22,6 +22,19 @@ CLAUDE_MODEL = "claude-3-5-sonnet-20241022" # Using a valid sonnet model as defa
 CLAUDE_MODEL_USER = "claude-sonnet-4-20250514" 
 # NOTE: If this model tag doesn't exist, it will fail. I will use it as requested.
 
+from config import ACAT_REF_PATH
+from processors.input_processor import load_acat_reference
+
+# Preload Reference Data
+INIT_ERROR = None
+try:
+    GLOBAL_ACAT_REFS = load_acat_reference(ACAT_REF_PATH)
+    logger.info(f"Server loaded {len(GLOBAL_ACAT_REFS)} reference items.")
+except Exception as e:
+    INIT_ERROR = str(e)
+    logger.error(f"Failed to preload ACAT references: {e}")
+    GLOBAL_ACAT_REFS = []
+
 PRODUCT_MAP = {
     "sql server": "mssql",
     "postgresql": "postgresql",
@@ -65,12 +78,37 @@ mcp = FastMCP("acat_matcher")
 anthropic_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 @mcp.tool()
-def llm_match(input_datastore: str, reference_list: List[str]) -> Dict[str, Any]:
+def llm_match(input_datastore: str, reference_list: List[str] = None) -> Dict[str, Any]:
     """
     Match a user-provided datastore to the ACAT reference list using an LLM.
+    
+    Args:
+        input_datastore: The name of the datastore/software to match.
+        reference_list: Optional. If not provided, uses the server's pre-loaded ACAT master list.
     """
     time.sleep(0.5) # Rate limiting
     
+    # Use provided list or fallback to global
+    refs = reference_list if reference_list is not None else GLOBAL_ACAT_REFS
+    
+    if not refs:
+        return {
+            "matched_datastore": "ERROR",
+            "confidence": 0.0,
+            "reasoning": f"Server failed to load refs: {INIT_ERROR}"
+        }
+
+    # 1. Exact Match Check (Optimization)
+    input_lower = input_datastore.lower().strip()
+    for ref in refs:
+        if ref.lower().strip() == input_lower:
+            logger.info(f"Exact match found (server-side): {input_datastore} -> {ref}")
+            return {
+                "matched_datastore": ref,
+                "confidence": 1.0,
+                "reasoning": "Exact string match (server-side optimization)"
+            }
+
     logger.info(f"LLM Matching: {input_datastore}")
     
     # Constructing the Prompt
@@ -82,7 +120,7 @@ def llm_match(input_datastore: str, reference_list: List[str]) -> Dict[str, Any]
     Input Datastore: "{input_datastore}"
     
     ACAT Reference List:
-    {json.dumps(reference_list, indent=2)}
+    {json.dumps(refs, indent=2)}
     
     Instructions:
     1. Analyze the input datastore name (accounting for typos, version numbers, or variations).
@@ -116,6 +154,12 @@ def llm_match(input_datastore: str, reference_list: List[str]) -> Dict[str, Any]
         content = content.replace("```json", "").replace("```", "").strip()
         
         result = json.loads(content)
+        
+        # Heuristic: Guide Claude to Phase 2 if Phase 1 fails
+        if result.get("matched_datastore") == "NOT FOUND" or result.get("confidence", 0) < 0.7:
+             existing_reasoning = result.get("reasoning", "")
+             result["reasoning"] = f"{existing_reasoning}. Recommendation: detailed version info might be available via 'endoflife_lookup'."
+             
         return result
         
     except Exception as e:

@@ -8,7 +8,7 @@ def setup_logger(name="datastore_matcher"):
     logger.setLevel(level)
 
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
+        handler = logging.StreamHandler(sys.stderr)
         handler.setLevel(level)
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
